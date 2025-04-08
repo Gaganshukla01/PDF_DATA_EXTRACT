@@ -1,7 +1,7 @@
-import streamlit as st
 from google import genai
 from pydantic import BaseModel, Field
 from twilio.rest import Client as TwilioClient
+from flask import Flask, request, jsonify
 import os
 
 # Initialize Google API client
@@ -36,32 +36,45 @@ def extract_structured_data(file_path: str, model: BaseModel):
     response = client.models.generate_content(model=model_id, contents=[prompt, file], config={'response_mime_type': 'application/json', 'response_schema': model})
     return response.parsed
 
-# Streamlit app to handle file uploads and data extraction
-st.title("PDF Data Extraction")
+# Flask app to handle incoming WhatsApp messages
+app = Flask(__name__)
 
-uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    incoming_msg = request.values.get('Body', '').strip()
+    from_number = request.values.get('From')
 
-if uploaded_file is not None:
-    pdf_file_path = f"/tmp/{uploaded_file.name}"
-    with open(pdf_file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    # Check if the incoming message contains a PDF
+    if 'application/pdf' in request.headers.get('Content-Type', ''):
+        # Save the PDF file
+        pdf_file = request.files['file']
+        pdf_file_path = f"/tmp/{pdf_file.filename}"
+        pdf_file.save(pdf_file_path)
 
-    result = extract_structured_data(pdf_file_path, Invoice)
+        # Extract data from the PDF
+        result = extract_structured_data(pdf_file_path, Invoice)
 
-    st.write(f"Extracted Invoice: {result.invoice_number} on {result.date} with total gross worth {result.total_gross_worth}")
-    for item in result.items:
-        st.write(f"Item: {item.description} with quantity {item.quantity} and gross worth {item.gross_worth}")
-
-    # Send the response back to the user via Twilio
-    from_number = st.text_input("Enter your WhatsApp number")
-    if st.button("Send via WhatsApp"):
+        # Create a response message
         response_message = f"Extracted Invoice: {result.invoice_number} on {result.date} with total gross worth {result.total_gross_worth}\n"
         for item in result.items:
             response_message += f"Item: {item.description} with quantity {item.quantity} and gross worth {item.gross_worth}\n"
 
+        # Send the response back to the user
         twilio_client.messages.create(
             body=response_message,
             from_=TWILIO_WHATSAPP_NUMBER,
-            to=f"whatsapp:{from_number}"
+            to=from_number
         )
-        st.success("Message sent successfully!")
+    else:
+        # Handle non-PDF messages
+        twilio_client.messages.create(
+            body="Please send a PDF file for data extraction.",
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to=from_number
+        )
+
+    return jsonify({'status': 'success'}), 200
+
+# Run the Flask app
+if __name__ == '__main__':
+    app.run(port=5000)
